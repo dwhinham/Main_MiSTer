@@ -120,6 +120,81 @@ static uint32_t get_fp()
 	return fp;
 }
 
+// Output buffer size should be at least 2x the size of the input
+static void latin1_to_utf8(char* output, const char* input)
+{
+	auto* inp = reinterpret_cast<const unsigned char*>(input);
+	auto* outp = reinterpret_cast<unsigned char*>(output);
+
+	while (*inp)
+	{
+		if (*inp < 0x80)
+		{
+			// ASCII range
+			*(outp++) = *(inp++);
+		}
+		else
+		{
+			// Latin-1 range needs encoding
+			*(outp++) = 0xC2 | (*inp >> 6);
+			*(outp++) = 0x80 | (*(inp++) & 0x3F);
+		}
+	}
+
+	*outp = '\0';
+}
+
+// Pass nullptr to output to just test ability to convert
+static bool utf8_to_latin1(char* output, const char* input)
+{
+	auto* inp = reinterpret_cast<const unsigned char*>(input);
+	auto* outp = reinterpret_cast<unsigned char*>(output);
+	bool expectcont = false;
+
+	while (*inp)
+	{
+		if (!expectcont && (*inp < 0x80))
+		{
+			// ASCII range
+			if (outp)
+				*(outp++) = *(inp++);
+			else
+				inp++;
+		}
+		else if (!expectcont && ((*inp & 0xE0) == 0xC0) && ((*inp & 0x1F) == (*inp & 0x03)))
+		{
+			// UTF-8 start byte in Latin-1 range
+			inp++;
+			expectcont = true;
+		}
+		else if (expectcont && ((*inp & 0xC0) == 0x80))
+		{
+			// UTF-8 continuation byte in Latin-1 range
+			unsigned char ch = (*(inp - 1) << 6) | (*inp & 0x3F);
+
+			if (ch < 0xA0)
+			{
+				// C1 control character
+				return false;
+			}
+
+			if (outp)
+				*(outp++) = ch;
+			inp++;
+			expectcont = false;
+		}
+		else
+		{
+			// Invalid UTF-8 data or out of Latin-1 range
+			return false;
+		}
+	}
+
+	if (outp)
+		*outp = '\0';
+	return true;
+}
+
 static char* find_path(uint32_t key, const char *name)
 {
 	dbg_print("find_path(%d, %s)\n", key, name);
@@ -146,8 +221,10 @@ static char* find_path(uint32_t key, const char *name)
 
 	if (strlen(name))
 	{
+		static char name_utf8[1024] = {};
+		latin1_to_utf8(name_utf8, name);
 		strcat(str, "/");
-		strcat(str, name);
+		strcat(str, name_utf8);
 	}
 
 	dbg_print("Requested path: %s\n", str);
@@ -413,7 +490,7 @@ static int process_request(void *reqres_buffer)
 			{
 				dbg_print("  examine first\n");
 
-				if (!strlen(name + baselen)) strcpy(fn, "MiSTer");
+				if (!strlen(name + baselen)) strcpy(fn, VOLUME_NAME);
 				else
 				{
 					const char *p = strrchr(name, '/');
@@ -435,7 +512,7 @@ static int process_request(void *reqres_buffer)
 					struct dirent64 *de;
 					while ((de = readdir64(d)))
 					{
-						if (!strcmp(de->d_name, "..") || !strcmp(de->d_name, ".")) continue;
+						if (!strcmp(de->d_name, "..") || !strcmp(de->d_name, ".") || !utf8_to_latin1(nullptr, de->d_name)) continue;
 						locks[key].dir_items.push_back(*de);
 					}
 					closedir(d);
@@ -496,7 +573,7 @@ static int process_request(void *reqres_buffer)
 			fill_date(time, res->date);
 
 			res->file_name[0] = strlen(fn);
-			strcpy(res->file_name + 1, fn);
+			utf8_to_latin1(res->file_name + 1, fn);
 
 			sz_res = sizeof(ExamineObjectResponse) + strlen(fn);
 			ret = 0;
@@ -555,7 +632,7 @@ static int process_request(void *reqres_buffer)
 			fill_date(time, res->date);
 
 			res->file_name[0] = strlen(fn);
-			strcpy(res->file_name + 1, fn);
+			utf8_to_latin1(res->file_name + 1, fn);
 
 			sz_res = sizeof(ExamineFhResponse) + strlen(fn);
 			ret = 0;
